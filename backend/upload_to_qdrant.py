@@ -22,7 +22,7 @@ load_dotenv()
 
 # Configuration
 COLLECTION_NAME = "siggraph2025_papers"
-CHUNKS_PATH = "./chunks.json"
+CHUNKS_PATH = "backend/chunks.json"
 BATCH_SIZE = 100  # BGE model can handle larger batches
 EMBEDDING_MODEL = "baai/bge-large-en-v1.5"  # Via OpenRouter
 VECTOR_SIZE = 1024  # Dimension for BAAI/bge-large-en-v1.5

@@ -33,8 +33,8 @@ try:
 except ImportError:
     pass
 
-from test_backend_integration import RAGGenerator, GenerationConfig, SYSTEM_PROMPT
-
+# from test_backend_integration import RAGGenerator, GenerationConfig, SYSTEM_PROMPT
+from rag_generate import RAGGenerator, GenerationConfig, SYSTEM_PROMPT
 
 # Global instances
 rag_generator: Optional[RAGGenerator] = None
@@ -54,10 +54,11 @@ async def lifespan(app: FastAPI):
     print("="*60)
     
     config = GenerationConfig(
-        llm_provider="openai",
+        llm_model="openai/gpt-4o",
         retrieval_top_k=8,
         refine_query=True,
-        use_reranker=True
+        temperature=0.1,
+        max_tokens=2000
     )
     
     rag_generator = RAGGenerator(config)
@@ -91,7 +92,7 @@ class QueryRequest(BaseModel):
     query: str
     top_k: Optional[int] = 8
     refine_query: Optional[bool] = True
-    use_reranker: Optional[bool] = True
+    use_reranker: Optional[bool] = False
     temperature: Optional[float] = 0.3
 
 

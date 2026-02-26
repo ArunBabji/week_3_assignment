@@ -22,8 +22,8 @@ load_dotenv()
 
 # Configuration
 COLLECTION_NAME = "siggraph2025_papers"
-CHUNKS_PATH = "./chunks.json"
-EMBEDDINGS_PATH = "./embeddings_BAAI_bge_large_en_v1.5.npz"
+CHUNKS_PATH = "backend/chunks.json"
+EMBEDDINGS_PATH = "backend/embeddings_BAAI_bge_large_en_v1.5.npz"
 VECTOR_SIZE = 1024  # Dimension for BAAI/bge-large-en-v1.5
 BATCH_SIZE = 100  # Can be larger since no API calls needed
 

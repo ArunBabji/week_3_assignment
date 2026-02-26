@@ -55,14 +55,14 @@ class RetrievalResult:
 @dataclass
 class RetrievalPipelineConfig:
     """Configuration for the retrieval pipeline."""
-    qdrant_url: str
-    qdrant_api_key: str
-    openrouter_api_key: str
+    qdrant_url: str = os.getenv("QDRANT_URL")
+    qdrant_api_key: str = os.getenv("QDRANT_API_KEY")
+    openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY")
     embedding_model: str = "baai/bge-large-en-v1.5"
-    chunks_path: str = "./chunks.json"
+    chunks_path: str = os.getenv("CHUNKS_PATH", "./chunks.json")
     semantic_weight: float = 0.7
     bm25_weight: float = 0.3
-    use_reranker: bool = True
+    use_reranker: bool = False
     cohere_api_key: Optional[str] = None
 
 
@@ -85,7 +85,9 @@ class OpenRouterEmbedder:
             api_key: OpenRouter API key
             model: Embedding model to use
         """
-        pass
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://openrouter.ai/api/v1"
     
     def embed_query(self, text: str) -> np.ndarray:
         """
@@ -96,6 +98,7 @@ class OpenRouterEmbedder:
            - "Authorization": f"Bearer {self.api_key}"
            - "Content-Type": "application/json"
         
+
         2. Build payload dict:
            - "model": self.model
            - "input": text
@@ -117,8 +120,21 @@ class OpenRouterEmbedder:
         Returns:
             Embedding vector as numpy array
         """
-        pass
-
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        payload = {
+            "model": self.model,
+            "input": text,
+        }
+        
+        response = requests.post("https://openrouter.ai/api/v1/embeddings", headers=headers, json=payload)
+        response.raise_for_status()
+        response_data = response.json()
+        embedding = response_data["data"][0]["embedding"]
+        return np.array(embedding, dtype=np.float32)
 
 class BM25Index:
     """
@@ -146,7 +162,10 @@ class BM25Index:
         Args:
             chunks: List of chunk dictionaries from chunks.json
         """
-        pass
+        self.chunks = chunks
+        self.chunk_id_to_idx = {c["chunk_id"]: i for i, c in enumerate(chunks)}
+        self.tokenized_docs = [self._tokenize(c["text"]) for c in chunks]
+        self.bm25 = BM25Okapi(self.tokenized_docs)
     
     def _tokenize(self, text: str) -> list[str]:
         """
@@ -165,7 +184,7 @@ class BM25Index:
         Returns:
             List of lowercase word tokens
         """
-        pass
+        return re.findall(r'\w+', text.lower())
     
     def search(self, query: str, top_k: int = 50) -> list[tuple[int, float]]:
         """
@@ -189,7 +208,10 @@ class BM25Index:
         Returns:
             List of (chunk_index, score) tuples, sorted by score descending
         """
-        pass
+        tokenized_query = self._tokenize(query)
+        scores = self.bm25.get_scores(tokenized_query)
+        top_k_indices = np.argsort(scores)[::-1][:top_k]
+        return [(i, scores[i]) for i in top_k_indices if scores[i] > 0]
 
 
 class RetrievalPipeline:
@@ -233,7 +255,39 @@ class RetrievalPipeline:
         Args:
             config: Optional configuration. If None, loads from environment variables.
         """
-        pass
+        if config is None:
+           config = RetrievalPipelineConfig(
+               qdrant_url=os.getenv("QDRANT_URL"),
+               qdrant_api_key=os.getenv("QDRANT_API_KEY"),
+               openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
+               cohere_api_key=os.getenv("COHERE_API_KEY"),
+               chunks_path=os.getenv("CHUNKS_PATH")
+           )
+        
+        self.config = config
+        if config.qdrant_url is None or config.qdrant_api_key is None or config.openrouter_api_key is None:
+            raise ValueError("Missing required configuration")
+        
+        # Initialize Qdrant client
+        self.qdrant = QdrantClient(
+            url=config.qdrant_url,
+            api_key=config.qdrant_api_key
+        )
+        
+        # Initialize the embedder
+        self.embedder = OpenRouterEmbedder(
+            api_key=config.openrouter_api_key,
+            model=config.embedding_model
+        )
+        
+        # Load chunks from JSON file
+        with open(config.chunks_path, 'r') as f:
+            chunks_data = json.load(f)
+            self.chunks = chunks_data["chunks"]
+        
+        # Build BM25 index
+        self.bm25_index = BM25Index(self.chunks)
+        print("BM25 index built")
     
     def semantic_search(self, query: str, top_k: int = 30) -> list[dict]:
         """
@@ -264,12 +318,25 @@ class RetrievalPipeline:
         Args:
             query: Search query
             top_k: Number of results to return
-            
+    
         Returns:
             List of result dicts with chunk_id, score, and payload
         """
-        pass
-    
+        query_embedding = self.embedder.embed_query(query)
+        results = self.qdrant.query_points(
+               collection_name=COLLECTION_NAME,
+               query=query_embedding.tolist(),
+               limit=top_k,
+               with_payload=True
+           ).points
+        return [
+               {
+                   "chunk_id": r.payload["chunk_id"],
+                   "score": r.score,
+                   "payload": r.payload
+               }
+               for r in results
+           ]
     def bm25_search(self, query: str, top_k: int = 30) -> list[dict]:
         """
         Perform BM25 keyword search.
@@ -295,7 +362,15 @@ class RetrievalPipeline:
         Returns:
             List of result dicts with chunk_id, score, and payload
         """
-        pass
+        results = self.bm25_index.search(query,top_k)
+        return [
+            {
+                "chunk_id": self.chunks[idx]["chunk_id"],
+                "score": score,
+                "payload": self.chunks[idx]
+            }
+            for idx, score in results
+        ]
     
     def hybrid_search(self, query: str, semantic_top_k: int = 30, bm25_top_k: int = 30) -> list[dict]:
         """
@@ -340,7 +415,58 @@ class RetrievalPipeline:
         Returns:
             Combined and sorted list of results
         """
-        pass
+        semantic_results = self.semantic_search(query, semantic_top_k)
+        bm25_results = self.bm25_search(query, bm25_top_k)
+        #normalizing semantic_results
+        if semantic_results:
+            max_semantic = max(r["score"] for r in semantic_results)
+            for r in semantic_results:
+                r["normalized_score"] = r["score"] / max_semantic if max_semantic > 0 else 0
+        #normalizing bm25_results
+        if bm25_results:
+            max_bm25 = max(r["score"] for r in bm25_results)
+            for r in bm25_results:
+                r["normalized_score"] = r["score"] / max_bm25 if max_bm25 > 0 else 0
+        #Combine results from both searches into a single dictionary with key chunk_id
+        combined = {}
+        
+        # Add semantic results
+        for result in semantic_results:
+            chunk_id = result["chunk_id"]
+            combined[chunk_id] = {
+                "chunk_id": chunk_id,
+                "semantic_score": result["score"],
+                "semantic_normalized": result["normalized_score"],
+                "payload": result["payload"]
+            }
+        
+        # Add BM25 results and merge with existing entries
+        for result in bm25_results:
+            chunk_id = result["chunk_id"]
+            if chunk_id in combined:
+                # Merge with existing semantic result
+                combined[chunk_id]["bm25_score"] = result["score"]
+                combined[chunk_id]["bm25_normalized"] = result["normalized_score"]
+            else:
+                # Add new entry for BM25-only result
+                combined[chunk_id] = {
+                    "chunk_id": chunk_id,
+                    "bm25_score": result["score"],
+                    "bm25_normalized": result["normalized_score"],
+                    "payload": result["payload"]
+                }
+        
+        # Calculate combined scores and sort
+        for chunk_id, result in combined.items():
+            semantic_score = result.get("semantic_normalized", 0)
+            bm25_score = result.get("bm25_normalized", 0)
+            combined_score = (self.config.semantic_weight * semantic_score) + (self.config.bm25_weight * bm25_score)
+            result["combined_score"] = combined_score
+        
+        # Sort by combined_score descending
+        results = sorted(combined.values(), key=lambda x: x["combined_score"], reverse=True)
+        return results
+        
     
     def rerank(self, query: str, results: list[dict], top_k: int = 10) -> list[dict]:
         """
@@ -425,7 +551,31 @@ class RetrievalPipeline:
         Returns:
             List of RetrievalResult objects ready for RAG generation
         """
-        pass
+        candidates = self.hybrid_search(query)
+        #Rerank if enabled - I have not implemented reranker yet
+        if self.config.use_reranker:
+            reranked = self.rerank(query, candidates, top_k=min(top_k*2,len(candidates)))
+        else:
+            reranked = candidates
+        final = reranked[:top_k]
+        return [
+               RetrievalResult(
+                   chunk_id=r["payload"]["chunk_id"],
+                   paper_id=r["payload"]["paper_id"],
+                   title=r["payload"]["title"],
+                   authors=r["payload"]["authors"],
+                   text=r["payload"]["text"],
+                   score=r.get("rerank_score", r.get("combined_score", r.get("score", 0))),
+                   chunk_type=r["payload"].get("chunk_type", ""),
+                   chunk_section=r["payload"].get("chunk_section", ""),
+                   pdf_url=r["payload"].get("pdf_url"),
+                   github_link=r["payload"].get("github_link"),
+                   video_link=r["payload"].get("video_link"),
+                   acm_url=r["payload"].get("acm_url"),
+                   abstract_url=r["payload"].get("abstract_url"),
+               )
+               for r in final
+           ]
 
 
 # For testing this file directly
@@ -437,7 +587,16 @@ if __name__ == "__main__":
     print(f"Testing retrieval pipeline with query: '{query}'")
     print("=" * 60)
     
-    pipeline = RetrievalPipeline()
+    # Create config from environment variables
+    config = RetrievalPipelineConfig(
+        qdrant_url=os.getenv("QDRANT_URL"),
+        qdrant_api_key=os.getenv("QDRANT_API_KEY"),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
+        cohere_api_key=os.getenv("COHERE_API_KEY"),
+        chunks_path="backend/chunks.json"
+    )
+    
+    pipeline = RetrievalPipeline(config)
     results = pipeline.retrieve(query, top_k=5)
     
     print(f"\nFound {len(results)} results:\n")
